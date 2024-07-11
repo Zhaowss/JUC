@@ -23,24 +23,44 @@ import java.util.concurrent.locks.ReentrantLock;
 public class test1 {
 
     public static void main(String[] args) {
-        ThreadPool threadPool = new ThreadPool(2, 1000, TimeUnit.MILLISECONDS,10);
-        for (int i = 0; i < 5; i++) {
+        ThreadPool threadPool = new ThreadPool(2, 1000, TimeUnit.MILLISECONDS,10,(queue,task)->{
+//           死等
+              queue.put(task);
+//            让调用者放弃该任务的执行
+//              log.info("放弃任务的执行{}",task);
+//            让调用者抛出异常
+//              log.info("放弃任务的异常{}",task);
+//            让调用者等待。
+//              queue.offer(task,100,TimeUnit.NANOSECONDS);
+        });
+        for (int i = 0; i < 15; i++) {
             int i1=i;
             threadPool.execute(()->{
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
                 log.info("方法{}在线程池中的打印",i1);
             });
         }
-
     }
-
 }
+
+
+@FunctionalInterface
+interface  RejectPolicy<T>{
+    void reject(Blockqeue<T> blockqeue,T task);
+}
+
 @Slf4j
 class ThreadPool{
-    public ThreadPool(int coresize, long timeout, TimeUnit timeUnit,int capecty) {
+    public ThreadPool(int coresize, long timeout, TimeUnit timeUnit,int capecty,RejectPolicy<Runnable> rejectPolicy) {
         this.coresize = coresize;
         this.timeout = timeout;
         this.timeUnit = timeUnit;
         this.taskqueue=new Blockqeue<>(capecty);
+        this.rejectPolicy=rejectPolicy;
     }
 
     //    我们的任务队列
@@ -53,6 +73,7 @@ class ThreadPool{
     private long timeout;
 //    获取任务的超时时间单位
     private TimeUnit timeUnit;
+    private RejectPolicy<Runnable> rejectPolicy;
 
 
     public void execute(Runnable task){
@@ -68,7 +89,19 @@ class ThreadPool{
             }
 //        如果任务数超过我们的任务的core size的时候，我们将其放入我们的等待的队列
             else {
-                taskqueue.put(task);
+//                taskqueue.put(task);
+//                1四等
+
+//                超时等待
+
+//                放弃任务执行
+
+//                抛出异常
+
+//                让调用者自行执行任务。
+
+//                抽象成一个接口中的抽象方法
+                taskqueue.tryput(rejectPolicy,task);
                 log.info("新增任务到我们的任务队列中{}",task);
             }
         }
@@ -85,7 +118,7 @@ class ThreadPool{
         public void run() {
 //            判断当前的task中是否为空
 //            如果当前task为空，检查当前的队列中是否存在元素
-            while (task1!=null || (task1=taskqueue.take())!=null){
+            while (task1!=null || (task1=taskqueue.poll(timeout,timeUnit))!=null){
                 try {
                     log.info("正在执行的----{}",task1);
                  task1.run();
@@ -95,7 +128,6 @@ class ThreadPool{
                     task1=null;
                 }
             }
-
             synchronized (workers){
                 workers.remove(this);
                 log.info("worker 被移除掉{}",this);
@@ -108,6 +140,8 @@ class ThreadPool{
 
 
 
+
+@Slf4j
 //阻塞队列的实现
 class Blockqeue<T>{
 
@@ -141,14 +175,12 @@ class Blockqeue<T>{
                     }
 //                    返回的是剩余时间
                     nanos = nullwaitset.awaitNanos(nanos);
-
-
                 } catch (InterruptedException e) {
                     throw new RuntimeException(e);
                 }
             }
-            T first = tDeque.getFirst();
-            fullwaitset.signalAll();
+            T first = tDeque.removeFirst();
+            fullwaitset.signal();
             return first;
         }finally {
             reentranlock.unlock();
@@ -166,8 +198,8 @@ class Blockqeue<T>{
                    throw new RuntimeException(e);
                }
            }
-            T first = tDeque.getFirst();
-            fullwaitset.signalAll();
+            T first = tDeque.removeFirst();
+            fullwaitset.signal();
            return first;
         }finally {
             reentranlock.unlock();
@@ -180,13 +212,39 @@ class Blockqeue<T>{
         try {
             while (tDeque.size()==capcity){
                 try {
+                    log.info("等待加入任务队列 {}",element);
                     fullwaitset.await();
                 } catch (InterruptedException e) {
                     throw new RuntimeException(e);
                 }
             }
+            log.info("加入任务队列 {}",element);
             tDeque.addLast(element);
-            nullwaitset.signalAll();
+            nullwaitset.signal();
+        }finally {
+            reentranlock.unlock();
+        }
+    };
+//带有超时时间的阻塞添加
+    public boolean offer(T element,long timeout,TimeUnit timeUnit){
+        reentranlock.lock();
+        try {
+            long nanos=timeUnit.toNanos(timeout);
+            while (tDeque.size()==capcity){
+                try {
+                    log.info("等待加入任务队列 {}",element);
+                    long l = fullwaitset.awaitNanos(nanos);
+                    if (l<=0){
+                        return false;
+                    }
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+            log.info("加入任务队列 {}",element);
+            tDeque.addLast(element);
+            nullwaitset.signal();
+            return true;
         }finally {
             reentranlock.unlock();
         }
@@ -204,4 +262,24 @@ class Blockqeue<T>{
             reentranlock.unlock();
         }
     };
+
+    public void tryput(RejectPolicy<T> rejectPolicy, T task) {
+//        加锁的操作，对当前的插入的操作进行加锁
+       reentranlock.lock();
+
+       try {
+//           判断当前的线程是否已满
+             if (tDeque.size()==capcity){
+                 rejectPolicy.reject(this,task);
+             }else {
+                 /*j加入*/
+                 log.info("将任务加入我们的队列{}",task);
+                 tDeque.addLast(task);
+                 nullwaitset.signal();
+             }
+
+       }finally {
+           reentranlock.unlock();
+       }
+    }
 }
